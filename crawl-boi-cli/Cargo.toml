@@ -1,0 +1,11 @@
+[package]
+name = "crawl-boi-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "crawl-boi"
+path = "src/main.rs"
+
+[dependencies]
+crawl-boi-core = { path = "../crawl-boi-core" }
