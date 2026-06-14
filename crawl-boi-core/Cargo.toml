@@ -2,3 +2,7 @@
 name = "crawl-boi-core"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+url = { version = "2.5.8", features = ["serde"] }
