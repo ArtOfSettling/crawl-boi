@@ -13,9 +13,9 @@ impl CrawlScope {
         }
     }
 
-    /// Returns `true` iff the URL uses `http` or `https` and its host exactly matches the seed host.
+    /// Returns true iff the URL uses http or https and its host exactly matches the seed host.
     pub fn is_allowed(&self, url: &Url) -> bool {
-        // Strip fragment by working with scheme and host directly; the `Url` type already
+        // Strip fragment by working with scheme and host directly; the Url type already
         // excludes fragments from host()/scheme() accessors, but we are explicit here.
         let scheme = url.scheme();
         if scheme != "http" && scheme != "https" {

@@ -15,10 +15,10 @@ impl RobotsRules {
 pub struct RobotsParser;
 
 impl RobotsParser {
-    /// Parses `body` and returns the `RobotsRules` that apply to this crawler.
+    /// Parses body and returns the RobotsRules that apply to this crawler.
     ///
-    /// If a `crawl-boi`-specific stanza exists it takes full precedence over `*`. An empty
-    /// or absent `Disallow:` value is treated as "allow all" and is not recorded.
+    /// If a crawl-boi-specific stanza exists it takes full precedence over *. An empty
+    /// or absent Disallow: value is treated as "allow all" and is not recorded.
     pub fn parse(body: &str) -> RobotsRules {
         // Each stanza is a group of user-agents followed by directives.
         // We walk line-by-line, accumulating agents then directives.
