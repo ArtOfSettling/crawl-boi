@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 url = { version = "2.5.8", features = ["serde"] }
+scraper = "0.23"
 
 [dev-dependencies]
 proptest = "1"
