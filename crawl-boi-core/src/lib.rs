@@ -5,6 +5,8 @@ pub mod scope;
 pub mod parser;
 pub mod robots;
 pub mod fetcher;
+#[cfg(feature = "js-rendering")]
+mod js_fetcher;
 
 pub use types::{CrawlConfig, FetchError, PageResult};
 pub use scope::CrawlScope;
