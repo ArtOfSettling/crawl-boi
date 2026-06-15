@@ -249,4 +249,29 @@ mod tests {
             "[^:/ ]{0,5}".prop_map(|s| s),
         ]
     }
+
+    proptest! {
+        // Feature: crawl-boi, Property 12: Invalid URLs are rejected by the CLI validator
+        #[test]
+        fn invalid_urls_rejected(url in arb_invalid_url()) {
+            let result = validate_url(&url);
+            prop_assert!(result.is_err(), "Expected error for URL: {url}");
+        }
+
+        // Feature: crawl-boi, Property 16: Malformed --path-budget values are rejected
+        #[test]
+        fn malformed_path_budget_rejected(value in prop_oneof![
+            // No comma at all
+            "[a-z/]{1,10}".prop_map(|s| s),
+            // Empty prefix (starts with comma)
+            ",[0-9]{1,3}".prop_map(|s| s),
+            // Prefix not starting with /
+            "[a-z]{1,5}/,[0-9]{1,3}".prop_map(|s| s),
+            // Non-numeric count
+            "/[a-z]{1,5}/,[a-z]{1,5}".prop_map(|s| s),
+        ]) {
+            let result = parse_path_budget(&value);
+            prop_assert!(result.is_err(), "Expected error for path-budget: {value}");
+        }
+    }
 }

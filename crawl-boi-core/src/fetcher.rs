@@ -4,7 +4,7 @@ use url::Url;
 use crate::FetchError;
 
 /// Rust by default ensures this string is a valid UTF-8 string. This is a compile time protection.
-/// anyone who is familiar with rust and sees this function will know, but I'm leaving this comment 
+/// anyone who is familiar with rust and sees this function will know, but I'm leaving this comment
 // in case the consumer does not know.
 #[async_trait]
 pub trait Fetcher: Send + Sync {
@@ -47,10 +47,7 @@ impl Fetcher for HttpFetcher {
             });
         }
 
-        response
-            .text()
-            .await
-            .map_err(|_| FetchError::NonUtf8Body)
+        response.text().await.map_err(|_| FetchError::NonUtf8Body)
     }
 }
 
@@ -66,7 +63,9 @@ mod tests {
     #[async_trait]
     impl Fetcher for StatusMockFetcher {
         async fn fetch(&self, _url: &Url) -> Result<String, FetchError> {
-            Err(FetchError::Http { status: self.status })
+            Err(FetchError::Http {
+                status: self.status,
+            })
         }
     }
 

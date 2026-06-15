@@ -73,10 +73,7 @@ mod tests {
     fn no_matching_prefix_returns_none() {
         let budget = CrawlBudget {
             max_pages: None,
-            path_limits: vec![
-                ("/blog/".to_string(), 10),
-                ("/docs/".to_string(), 5),
-            ],
+            path_limits: vec![("/blog/".to_string(), 10), ("/docs/".to_string(), 5)],
         };
         assert_eq!(budget.matching_prefix("/about"), None);
     }
@@ -99,9 +96,8 @@ mod tests {
     }
 
     fn arb_prefix() -> impl Strategy<Value = String> {
-        proptest::collection::vec("[a-z]{1,5}", 1..=4).prop_map(|segments| {
-            format!("/{}/", segments.join("/"))
-        })
+        proptest::collection::vec("[a-z]{1,5}", 1..=4)
+            .prop_map(|segments| format!("/{}/", segments.join("/")))
     }
 
     fn arb_path_limits() -> impl Strategy<Value = Vec<(String, usize)>> {

@@ -12,11 +12,6 @@ pub fn print_plain(result: &PageResult) {
     }
 }
 
-/// Prints a fetch error to stderr for the given URL.
-pub fn print_error(url: &url::Url, error: &str) {
-    eprintln!("{url}: {error}");
-}
-
 /// Formats a page result as plain text, writing to the provided writer.
 /// Useful for testing without capturing stdout.
 pub fn format_plain<W: Write>(writer: &mut W, result: &PageResult) -> io::Result<()> {

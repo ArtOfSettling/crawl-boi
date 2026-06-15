@@ -12,7 +12,8 @@ use crate::robots::RobotsParser;
 use crate::scope::CrawlScope;
 use crate::types::{CrawlBudget, CrawlConfig, FetchError, PageResult};
 
-type FetchTask = Pin<Box<dyn std::future::Future<Output = (Url, Result<String, FetchError>)> + Send>>;
+type FetchTask =
+    Pin<Box<dyn std::future::Future<Output = (Url, Result<String, FetchError>)> + Send>>;
 
 pub struct Crawler<F: Fetcher> {
     config: CrawlConfig,
@@ -24,10 +25,15 @@ pub struct Crawler<F: Fetcher> {
 impl<F: Fetcher + 'static> Crawler<F> {
     pub fn new(config: CrawlConfig, fetcher: F, budget: CrawlBudget) -> Self {
         let scope = CrawlScope::new(&config.seed);
-        Self { config, scope, fetcher, budget }
+        Self {
+            config,
+            scope,
+            fetcher,
+            budget,
+        }
     }
 
-    /// Streams page results as they are crawled. Returns a receiver that yields each PageResult the moment the page has been 
+    /// Streams page results as they are crawled. Returns a receiver that yields each PageResult the moment the page has been
     /// fetched and parsed. The crawl runs in a background task and the channel closes when the crawl is complete.
     pub fn run(self) -> mpsc::Receiver<PageResult> {
         let (tx, rx) = mpsc::channel(64);
@@ -71,7 +77,8 @@ impl<F: Fetcher + 'static> Crawler<F> {
 
         let fetcher = Arc::new(self.fetcher);
         let mut pages_fetched: usize = 0;
-        let mut path_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut path_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         while !frontier.is_empty() && pages_fetched < max_pages {
             let mut tasks: FuturesUnordered<FetchTask> = FuturesUnordered::new();
@@ -106,7 +113,9 @@ impl<F: Fetcher + 'static> Crawler<F> {
                             }
                             if let Some(prefix) = self.budget.matching_prefix(link.path()) {
                                 let count = path_counts.get(prefix).copied().unwrap_or(0);
-                                let limit = self.budget.path_limits
+                                let limit = self
+                                    .budget
+                                    .path_limits
                                     .iter()
                                     .find(|(p, _)| p == prefix)
                                     .map(|(_, l)| *l)
@@ -185,9 +194,9 @@ impl<F: Fetcher + 'static> Crawler<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::CrawlBudget;
     use async_trait::async_trait;
     use std::collections::HashMap;
-    use crate::types::CrawlBudget;
 
     struct MockFetcher {
         responses: HashMap<Url, Result<String, FetchError>>,
@@ -252,7 +261,12 @@ mod tests {
         let mut responses = HashMap::new();
         responses.insert(url(seed), Ok(html_with_links(&[])));
 
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), CrawlBudget::default())).await;
+        let results = collect_results(Crawler::new(
+            config(seed),
+            MockFetcher::new(responses),
+            CrawlBudget::default(),
+        ))
+        .await;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].url, url(seed));
@@ -270,7 +284,12 @@ mod tests {
         responses.insert(url(page_a), Ok(html_with_links(&[])));
         responses.insert(url(page_b), Ok(html_with_links(&[])));
 
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), CrawlBudget::default())).await;
+        let results = collect_results(Crawler::new(
+            config(seed),
+            MockFetcher::new(responses),
+            CrawlBudget::default(),
+        ))
+        .await;
 
         let visited = sorted_urls(&results);
         assert_eq!(visited.len(), 3);
@@ -288,10 +307,19 @@ mod tests {
         responses.insert(url(seed), Ok(html_with_links(&[page_b])));
         responses.insert(url(page_b), Ok(html_with_links(&[seed])));
 
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), CrawlBudget::default())).await;
+        let results = collect_results(Crawler::new(
+            config(seed),
+            MockFetcher::new(responses),
+            CrawlBudget::default(),
+        ))
+        .await;
 
         let visited = sorted_urls(&results);
-        assert_eq!(visited.len(), 2, "each URL fetched exactly once; got {visited:?}");
+        assert_eq!(
+            visited.len(),
+            2,
+            "each URL fetched exactly once; got {visited:?}"
+        );
         assert!(visited.contains(&url(seed)));
         assert!(visited.contains(&url(page_b)));
     }
@@ -307,10 +335,18 @@ mod tests {
         responses.insert(url(page_a), Err(FetchError::Http { status: 500 }));
         responses.insert(url(page_b), Ok(html_with_links(&[])));
 
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), CrawlBudget::default())).await;
+        let results = collect_results(Crawler::new(
+            config(seed),
+            MockFetcher::new(responses),
+            CrawlBudget::default(),
+        ))
+        .await;
 
         let visited = sorted_urls(&results);
-        assert!(!visited.contains(&url(page_a)), "errored page should not appear in results");
+        assert!(
+            !visited.contains(&url(page_a)),
+            "errored page should not appear in results"
+        );
         assert!(visited.contains(&url(seed)));
         assert!(visited.contains(&url(page_b)));
     }
@@ -325,10 +361,18 @@ mod tests {
         responses.insert(url(seed), Ok(html_with_links(&[external, internal])));
         responses.insert(url(internal), Ok(html_with_links(&[])));
 
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), CrawlBudget::default())).await;
+        let results = collect_results(Crawler::new(
+            config(seed),
+            MockFetcher::new(responses),
+            CrawlBudget::default(),
+        ))
+        .await;
 
         let visited = sorted_urls(&results);
-        assert!(!visited.contains(&url(external)), "external URL must not be visited");
+        assert!(
+            !visited.contains(&url(external)),
+            "external URL must not be visited"
+        );
         assert!(visited.contains(&url(seed)));
         assert!(visited.contains(&url(internal)));
     }
@@ -339,21 +383,19 @@ mod tests {
         let allowed = "http://example.com/allowed";
         let disallowed = "http://example.com/private/secret";
 
-        let robots_body =
-            "User-agent: *\nDisallow: /private\n".to_owned();
+        let robots_body = "User-agent: *\nDisallow: /private\n".to_owned();
 
         let mut responses = HashMap::new();
-        responses.insert(
-            url("http://example.com/robots.txt"),
-            Ok(robots_body),
-        );
-        responses.insert(
-            url(seed),
-            Ok(html_with_links(&[allowed, disallowed])),
-        );
+        responses.insert(url("http://example.com/robots.txt"), Ok(robots_body));
+        responses.insert(url(seed), Ok(html_with_links(&[allowed, disallowed])));
         responses.insert(url(allowed), Ok(html_with_links(&[])));
 
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), CrawlBudget::default())).await;
+        let results = collect_results(Crawler::new(
+            config(seed),
+            MockFetcher::new(responses),
+            CrawlBudget::default(),
+        ))
+        .await;
 
         let visited = sorted_urls(&results);
         assert!(
@@ -379,7 +421,12 @@ mod tests {
             max_pages: Some(1),
             ..Default::default()
         };
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), budget)).await;
+        let results = collect_results(Crawler::new(
+            config(seed),
+            MockFetcher::new(responses),
+            budget,
+        ))
+        .await;
 
         assert_eq!(results.len(), 1);
     }
@@ -395,7 +442,12 @@ mod tests {
             max_pages: Some(0),
             ..Default::default()
         };
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), budget)).await;
+        let results = collect_results(Crawler::new(
+            config(seed),
+            MockFetcher::new(responses),
+            budget,
+        ))
+        .await;
 
         assert_eq!(results.len(), 0);
     }
@@ -410,7 +462,10 @@ mod tests {
         let deep5 = "http://example.com/deep/5";
 
         let mut responses = HashMap::new();
-        responses.insert(url(seed), Ok(html_with_links(&[deep1, deep2, deep3, deep4, deep5])));
+        responses.insert(
+            url(seed),
+            Ok(html_with_links(&[deep1, deep2, deep3, deep4, deep5])),
+        );
         responses.insert(url(deep1), Ok(html_with_links(&[])));
         responses.insert(url(deep2), Ok(html_with_links(&[])));
         responses.insert(url(deep3), Ok(html_with_links(&[])));
@@ -421,10 +476,21 @@ mod tests {
             max_pages: None,
             path_limits: vec![("/deep/".to_owned(), 2)],
         };
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), budget)).await;
+        let results = collect_results(Crawler::new(
+            config(seed),
+            MockFetcher::new(responses),
+            budget,
+        ))
+        .await;
 
-        let deep_count = results.iter().filter(|r| r.url.path().starts_with("/deep/")).count();
-        assert!(deep_count <= 2, "expected at most 2 pages under /deep/, got {deep_count}");
+        let deep_count = results
+            .iter()
+            .filter(|r| r.url.path().starts_with("/deep/"))
+            .count();
+        assert!(
+            deep_count <= 2,
+            "expected at most 2 pages under /deep/, got {deep_count}"
+        );
         assert!(results.iter().any(|r| r.url.as_str() == seed));
     }
 
@@ -445,9 +511,18 @@ mod tests {
             max_pages: Some(2),
             path_limits: vec![("/deep/".to_owned(), 10)],
         };
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), budget)).await;
+        let results = collect_results(Crawler::new(
+            config(seed),
+            MockFetcher::new(responses),
+            budget,
+        ))
+        .await;
 
-        assert!(results.len() <= 2, "global cap of 2 should be enforced, got {}", results.len());
+        assert!(
+            results.len() <= 2,
+            "global cap of 2 should be enforced, got {}",
+            results.len()
+        );
     }
 
     use proptest::prelude::*;

@@ -37,7 +37,10 @@ mod tests {
         // label: 1-8 lowercase ascii letters
         let label = "[a-z]{1,8}";
         // hostname: 1-3 dot-separated labels
-        (label, proptest::option::of((label, proptest::option::of(label))))
+        (
+            label,
+            proptest::option::of((label, proptest::option::of(label))),
+        )
             .prop_map(|(first, rest)| match rest {
                 None => first.to_owned(),
                 Some((second, None)) => format!("{}.{}", first, second),
@@ -50,7 +53,13 @@ mod tests {
     }
 
     fn arb_non_http_scheme() -> impl Strategy<Value = &'static str> {
-        prop_oneof![Just("ftp"), Just("ftps"), Just("file"), Just("ws"), Just("wss")]
+        prop_oneof![
+            Just("ftp"),
+            Just("ftps"),
+            Just("file"),
+            Just("ws"),
+            Just("wss")
+        ]
     }
 
     proptest! {

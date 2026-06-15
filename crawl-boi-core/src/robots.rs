@@ -92,9 +92,7 @@ impl RobotsParser {
         }
 
         // crawl-boi-specific rules take full precedence over wildcard.
-        let prefixes = crawl_boi_prefixes
-            .or(wildcard_prefixes)
-            .unwrap_or_default();
+        let prefixes = crawl_boi_prefixes.or(wildcard_prefixes).unwrap_or_default();
 
         RobotsRules {
             disallowed_prefixes: prefixes,
