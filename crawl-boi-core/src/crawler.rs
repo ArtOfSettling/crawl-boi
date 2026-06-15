@@ -10,20 +10,21 @@ use crate::fetcher::Fetcher;
 use crate::parser::extract_links;
 use crate::robots::RobotsParser;
 use crate::scope::CrawlScope;
-use crate::types::{CrawlConfig, FetchError, PageResult};
+use crate::types::{CrawlBudget, CrawlConfig, FetchError, PageResult};
 
 type FetchTask = Pin<Box<dyn std::future::Future<Output = (Url, Result<String, FetchError>)> + Send>>;
 
 pub struct Crawler<F: Fetcher> {
     config: CrawlConfig,
     scope: CrawlScope,
+    budget: CrawlBudget,
     fetcher: F,
 }
 
 impl<F: Fetcher + 'static> Crawler<F> {
-    pub fn new(config: CrawlConfig, fetcher: F) -> Self {
+    pub fn new(config: CrawlConfig, fetcher: F, budget: CrawlBudget) -> Self {
         let scope = CrawlScope::new(&config.seed);
-        Self { config, scope, fetcher }
+        Self { config, scope, fetcher, budget }
     }
 
     /// Streams page results as they are crawled. Returns a receiver that yields each PageResult the moment the page has been 
@@ -42,15 +43,22 @@ impl<F: Fetcher + 'static> Crawler<F> {
         let visited: Arc<Mutex<HashSet<Url>>> = Arc::new(Mutex::new(HashSet::new()));
         let mut frontier: VecDeque<Url> = VecDeque::new();
 
+        let max_pages = self.budget.max_pages.unwrap_or(usize::MAX);
+
+        // If max_pages is 0, do nothing.
+        if max_pages == 0 {
+            return;
+        }
+
         // Seed the frontier and visited set.
         // This does a BFS with concurrent fetching layered on top.
-        // The frontier is the queue, we keep the visited set and process level-by-level. Instead of visiting 
+        // The frontier is the queue, we keep the visited set and process level-by-level. Instead of visiting
         // one at a time, we drain up to 'concurrency' URLs at once into a pool and fetch them in parallel.
         // When a fetch completes, newly discovered links are added to the back of the frontier.
         // Essentially BFS-ish, frontier ordering is fifo, so it approximates BFS, but strict level-by-level guarantees don't hold
         // under concurrency.
         //
-        // Risks : 
+        // Risks :
         // * no crawl budget implemented yet, so, yeah.... Memroy explosion
         // * No server backpressure can in theory result in an endlessly growing frontier
         // * If the robots changes during processing ... we just keep processing as it is fetched once (unlikely, but possible).
@@ -62,13 +70,18 @@ impl<F: Fetcher + 'static> Crawler<F> {
         frontier.push_back(self.config.seed.clone());
 
         let fetcher = Arc::new(self.fetcher);
+        let mut pages_fetched: usize = 0;
+        let mut path_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
-        while !frontier.is_empty() {
+        while !frontier.is_empty() && pages_fetched < max_pages {
             let mut tasks: FuturesUnordered<FetchTask> = FuturesUnordered::new();
 
-            let batch: Vec<Url> = frontier
-                .drain(..frontier.len().min(self.config.concurrency))
-                .collect();
+            let batch_size = frontier
+                .len()
+                .min(self.config.concurrency)
+                .min(max_pages - pages_fetched);
+
+            let batch: Vec<Url> = frontier.drain(..batch_size).collect();
 
             for url in batch {
                 let fetcher = Arc::clone(&fetcher);
@@ -91,16 +104,37 @@ impl<F: Fetcher + 'static> Crawler<F> {
                             if !robots_rules.is_allowed(link.path()) {
                                 continue;
                             }
+                            if let Some(prefix) = self.budget.matching_prefix(link.path()) {
+                                let count = path_counts.get(prefix).copied().unwrap_or(0);
+                                let limit = self.budget.path_limits
+                                    .iter()
+                                    .find(|(p, _)| p == prefix)
+                                    .map(|(_, l)| *l)
+                                    .unwrap_or(usize::MAX);
+                                if count >= limit {
+                                    continue;
+                                }
+                            }
                             let mut v = visited.lock().unwrap();
                             if v.insert(link.clone()) {
+                                // Increment path budget counter at enqueue time so subsequent links in this batch see the updated count.
+                                if let Some(prefix) = self.budget.matching_prefix(link.path()) {
+                                    *path_counts.entry(prefix.to_owned()).or_insert(0) += 1;
+                                }
                                 new_urls.push(link.clone());
                             }
                         }
 
                         frontier.extend(new_urls.into_iter());
 
-                        // Send result to the consumer; if the receiver is dropped, stop crawling.
+                        // Increment global pages counter.
+                        pages_fetched += 1;
+
                         if tx.send(PageResult { url, links }).await.is_err() {
+                            return;
+                        }
+
+                        if pages_fetched >= max_pages {
                             return;
                         }
                     }
@@ -109,7 +143,14 @@ impl<F: Fetcher + 'static> Crawler<F> {
                     }
                 }
 
-                while tasks.len() < self.config.concurrency && !frontier.is_empty() {
+                if pages_fetched >= max_pages {
+                    return;
+                }
+
+                while tasks.len() < self.config.concurrency
+                    && !frontier.is_empty()
+                    && pages_fetched + tasks.len() < max_pages
+                {
                     let next_url = frontier.pop_front().unwrap();
                     let fetcher = Arc::clone(&fetcher);
                     tasks.push(Box::pin(async move {
@@ -146,6 +187,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::collections::HashMap;
+    use crate::types::CrawlBudget;
 
     struct MockFetcher {
         responses: HashMap<Url, Result<String, FetchError>>,
@@ -210,7 +252,7 @@ mod tests {
         let mut responses = HashMap::new();
         responses.insert(url(seed), Ok(html_with_links(&[])));
 
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses))).await;
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), CrawlBudget::default())).await;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].url, url(seed));
@@ -228,7 +270,7 @@ mod tests {
         responses.insert(url(page_a), Ok(html_with_links(&[])));
         responses.insert(url(page_b), Ok(html_with_links(&[])));
 
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses))).await;
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), CrawlBudget::default())).await;
 
         let visited = sorted_urls(&results);
         assert_eq!(visited.len(), 3);
@@ -246,7 +288,7 @@ mod tests {
         responses.insert(url(seed), Ok(html_with_links(&[page_b])));
         responses.insert(url(page_b), Ok(html_with_links(&[seed])));
 
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses))).await;
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), CrawlBudget::default())).await;
 
         let visited = sorted_urls(&results);
         assert_eq!(visited.len(), 2, "each URL fetched exactly once; got {visited:?}");
@@ -265,7 +307,7 @@ mod tests {
         responses.insert(url(page_a), Err(FetchError::Http { status: 500 }));
         responses.insert(url(page_b), Ok(html_with_links(&[])));
 
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses))).await;
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), CrawlBudget::default())).await;
 
         let visited = sorted_urls(&results);
         assert!(!visited.contains(&url(page_a)), "errored page should not appear in results");
@@ -283,7 +325,7 @@ mod tests {
         responses.insert(url(seed), Ok(html_with_links(&[external, internal])));
         responses.insert(url(internal), Ok(html_with_links(&[])));
 
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses))).await;
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), CrawlBudget::default())).await;
 
         let visited = sorted_urls(&results);
         assert!(!visited.contains(&url(external)), "external URL must not be visited");
@@ -311,7 +353,7 @@ mod tests {
         );
         responses.insert(url(allowed), Ok(html_with_links(&[])));
 
-        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses))).await;
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), CrawlBudget::default())).await;
 
         let visited = sorted_urls(&results);
         assert!(
@@ -320,6 +362,92 @@ mod tests {
         );
         assert!(visited.contains(&url(seed)));
         assert!(visited.contains(&url(allowed)));
+    }
+
+    #[tokio::test]
+    async fn max_pages_one_returns_single_result() {
+        let seed = "http://example.com/";
+        let page_a = "http://example.com/a";
+        let page_b = "http://example.com/b";
+
+        let mut responses = HashMap::new();
+        responses.insert(url(seed), Ok(html_with_links(&[page_a, page_b])));
+        responses.insert(url(page_a), Ok(html_with_links(&[])));
+        responses.insert(url(page_b), Ok(html_with_links(&[])));
+
+        let budget = CrawlBudget {
+            max_pages: Some(1),
+            ..Default::default()
+        };
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), budget)).await;
+
+        assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn max_pages_zero_returns_no_results() {
+        let seed = "http://example.com/";
+
+        let mut responses = HashMap::new();
+        responses.insert(url(seed), Ok(html_with_links(&[])));
+
+        let budget = CrawlBudget {
+            max_pages: Some(0),
+            ..Default::default()
+        };
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), budget)).await;
+
+        assert_eq!(results.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn path_budget_limits_pages_under_prefix() {
+        let seed = "http://example.com/";
+        let deep1 = "http://example.com/deep/1";
+        let deep2 = "http://example.com/deep/2";
+        let deep3 = "http://example.com/deep/3";
+        let deep4 = "http://example.com/deep/4";
+        let deep5 = "http://example.com/deep/5";
+
+        let mut responses = HashMap::new();
+        responses.insert(url(seed), Ok(html_with_links(&[deep1, deep2, deep3, deep4, deep5])));
+        responses.insert(url(deep1), Ok(html_with_links(&[])));
+        responses.insert(url(deep2), Ok(html_with_links(&[])));
+        responses.insert(url(deep3), Ok(html_with_links(&[])));
+        responses.insert(url(deep4), Ok(html_with_links(&[])));
+        responses.insert(url(deep5), Ok(html_with_links(&[])));
+
+        let budget = CrawlBudget {
+            max_pages: None,
+            path_limits: vec![("/deep/".to_owned(), 2)],
+        };
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), budget)).await;
+
+        let deep_count = results.iter().filter(|r| r.url.path().starts_with("/deep/")).count();
+        assert!(deep_count <= 2, "expected at most 2 pages under /deep/, got {deep_count}");
+        assert!(results.iter().any(|r| r.url.as_str() == seed));
+    }
+
+    #[tokio::test]
+    async fn global_cap_takes_precedence_over_path_budget() {
+        let seed = "http://example.com/";
+        let deep1 = "http://example.com/deep/1";
+        let deep2 = "http://example.com/deep/2";
+        let deep3 = "http://example.com/deep/3";
+
+        let mut responses = HashMap::new();
+        responses.insert(url(seed), Ok(html_with_links(&[deep1, deep2, deep3])));
+        responses.insert(url(deep1), Ok(html_with_links(&[])));
+        responses.insert(url(deep2), Ok(html_with_links(&[])));
+        responses.insert(url(deep3), Ok(html_with_links(&[])));
+
+        let budget = CrawlBudget {
+            max_pages: Some(2),
+            path_limits: vec![("/deep/".to_owned(), 10)],
+        };
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses), budget)).await;
+
+        assert!(results.len() <= 2, "global cap of 2 should be enforced, got {}", results.len());
     }
 
     use proptest::prelude::*;
@@ -379,7 +507,7 @@ mod tests {
             let results = tokio::runtime::Runtime::new()
                 .unwrap()
                 .block_on(async {
-                    let mut rx = Crawler::new(cfg, MockFetcher::new(responses)).run();
+                    let mut rx = Crawler::new(cfg, MockFetcher::new(responses), CrawlBudget::default()).run();
                     let mut results = Vec::new();
                     while let Some(r) = rx.recv().await {
                         results.push(r);
@@ -395,6 +523,98 @@ mod tests {
                     r.url
                 );
             }
+        }
+
+        // Global page cap invariant
+        #[test]
+        fn global_page_cap_invariant(
+            responses in arb_site_graph(8),
+            cap in 0_usize..=10,
+        ) {
+            let seed = "http://example.com/";
+            let cfg = CrawlConfig {
+                seed: Url::parse(seed).unwrap(),
+                concurrency: 4,
+            };
+            let budget = CrawlBudget {
+                max_pages: Some(cap),
+                ..Default::default()
+            };
+
+            let results = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async {
+                    let mut rx = Crawler::new(cfg, MockFetcher::new(responses), budget).run();
+                    let mut results = Vec::new();
+                    while let Some(r) = rx.recv().await {
+                        results.push(r);
+                    }
+                    results
+                });
+
+            prop_assert!(
+                results.len() <= cap,
+                "Expected at most {} results, got {}",
+                cap,
+                results.len()
+            );
+        }
+
+        // Path-prefix budget invariant
+        #[test]
+        fn path_prefix_budget_invariant(
+            paths in proptest::collection::vec(
+                proptest::string::string_regex("[a-z]{1,4}").unwrap(),
+                1..=6,
+            ),
+            limit in 1_usize..=4,
+        ) {
+            let seed = "http://example.com/";
+            let prefix = "/sub/";
+
+            let mut unique_paths: Vec<String> = paths;
+            unique_paths.sort();
+            unique_paths.dedup();
+
+            // Build a site where all discovered pages are under /sub/
+            let page_urls: Vec<String> = unique_paths.iter().map(|p| format!("http://example.com/sub/{p}")).collect();
+            let link_strs: Vec<&str> = page_urls.iter().map(|s| s.as_str()).collect();
+
+            let mut responses: HashMap<Url, Result<String, FetchError>> = HashMap::new();
+            responses.insert(Url::parse(seed).unwrap(), Ok(html_with_links(&link_strs)));
+            for page_url in &page_urls {
+                responses.insert(Url::parse(page_url).unwrap(), Ok(html_with_links(&[])));
+            }
+
+            let budget = CrawlBudget {
+                max_pages: None,
+                path_limits: vec![(prefix.to_owned(), limit)],
+            };
+
+            let cfg = CrawlConfig {
+                seed: Url::parse(seed).unwrap(),
+                concurrency: 4,
+            };
+
+            let results = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async {
+                    let mut rx = Crawler::new(cfg, MockFetcher::new(responses), budget).run();
+                    let mut results = Vec::new();
+                    while let Some(r) = rx.recv().await {
+                        results.push(r);
+                    }
+                    results
+                });
+
+            let prefix_count = results.iter().filter(|r| r.url.path().starts_with(prefix)).count();
+            prop_assert!(
+                prefix_count <= limit,
+                "Expected at most {} pages under prefix '{}', got {}",
+                limit,
+                prefix,
+                prefix_count
+            );
         }
     }
 }

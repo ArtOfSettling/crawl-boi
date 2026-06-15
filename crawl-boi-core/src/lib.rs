@@ -9,7 +9,7 @@ pub mod crawler;
 #[cfg(feature = "js-rendering")]
 mod js_fetcher;
 
-pub use types::{CrawlConfig, FetchError, PageResult};
+pub use types::{CrawlBudget, CrawlConfig, FetchError, PageResult};
 pub use scope::CrawlScope;
 pub use parser::extract_links;
 pub use robots::{RobotsParser, RobotsRules};
