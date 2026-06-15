@@ -9,3 +9,9 @@ path = "src/main.rs"
 
 [dependencies]
 crawl-boi-core = { path = "../crawl-boi-core" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+url = "2"
+
+[dev-dependencies]
+proptest = "1"
