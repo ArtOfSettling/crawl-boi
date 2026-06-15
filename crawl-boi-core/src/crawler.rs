@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use futures::stream::{FuturesUnordered, StreamExt};
+use tokio::sync::mpsc;
 use url::Url;
 
 use crate::fetcher::Fetcher;
@@ -11,8 +12,6 @@ use crate::robots::RobotsParser;
 use crate::scope::CrawlScope;
 use crate::types::{CrawlConfig, FetchError, PageResult};
 
-/// A FuturesUnordered is a bog of tasks running at the same time. The boxed future is a wrapper that
-/// homogenises those tasks so they can sit in the same pool.
 type FetchTask = Pin<Box<dyn std::future::Future<Output = (Url, Result<String, FetchError>)> + Send>>;
 
 pub struct Crawler<F: Fetcher> {
@@ -27,19 +26,29 @@ impl<F: Fetcher + 'static> Crawler<F> {
         Self { config, scope, fetcher }
     }
 
-    pub async fn run(self) -> Vec<PageResult> {
+    /// Streams page results as they are crawled. Returns a receiver that yields each PageResult the moment the page has been 
+    /// fetched and parsed. The crawl runs in a background task and the channel closes when the crawl is complete.
+    pub fn run(self) -> mpsc::Receiver<PageResult> {
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            self.crawl(tx).await;
+        });
+        rx
+    }
+
+    async fn crawl(self, tx: mpsc::Sender<PageResult>) {
         let robots_rules = self.fetch_robots().await;
 
         let visited: Arc<Mutex<HashSet<Url>>> = Arc::new(Mutex::new(HashSet::new()));
         let mut frontier: VecDeque<Url> = VecDeque::new();
-        let mut results: Vec<PageResult> = Vec::new();
 
         // Seed the frontier and visited set.
         // This does a BFS with concurrent fetching layered on top.
         // The frontier is the queue, we keep the visited set and process level-by-level. Instead of visiting 
         // one at a time, we drain up to 'concurrency' URLs at once into a pool and fetch them in parallel.
         // When a fetch completes, newly discovered links are added to the back of the frontier.
-        // Essentially BFS ordering within each 'wave'.
+        // Essentially BFS-ish, frontier ordering is fifo, so it approximates BFS, but strict level-by-level guarantees don't hold
+        // under concurrency.
         //
         // Risks : 
         // * no crawl budget implemented yet, so, yeah.... Memroy explosion
@@ -57,7 +66,6 @@ impl<F: Fetcher + 'static> Crawler<F> {
         while !frontier.is_empty() {
             let mut tasks: FuturesUnordered<FetchTask> = FuturesUnordered::new();
 
-            // Drain up to concurrency URLs into in-flight tasks.
             let batch: Vec<Url> = frontier
                 .drain(..frontier.len().min(self.config.concurrency))
                 .collect();
@@ -70,7 +78,6 @@ impl<F: Fetcher + 'static> Crawler<F> {
                 }));
             }
 
-            // Collect completed tasks, replenishing from the frontier as slots open.
             while let Some((url, fetch_result)) = tasks.next().await {
                 match fetch_result {
                     Ok(body) => {
@@ -91,14 +98,17 @@ impl<F: Fetcher + 'static> Crawler<F> {
                         }
 
                         frontier.extend(new_urls.into_iter());
-                        results.push(PageResult { url, links });
+
+                        // Send result to the consumer; if the receiver is dropped, stop crawling.
+                        if tx.send(PageResult { url, links }).await.is_err() {
+                            return;
+                        }
                     }
                     Err(err) => {
                         eprintln!("error fetching {url}: {err}");
                     }
                 }
 
-                // If the frontier has grown and we have spare capacity, dispatch more tasks.
                 while tasks.len() < self.config.concurrency && !frontier.is_empty() {
                     let next_url = frontier.pop_front().unwrap();
                     let fetcher = Arc::clone(&fetcher);
@@ -109,8 +119,6 @@ impl<F: Fetcher + 'static> Crawler<F> {
                 }
             }
         }
-
-        results
     }
 
     async fn fetch_robots(&self) -> crate::robots::RobotsRules {
@@ -152,7 +160,6 @@ mod tests {
     #[async_trait]
     impl Fetcher for MockFetcher {
         async fn fetch(&self, url: &Url) -> Result<String, FetchError> {
-            // Strip fragment before lookup so the mock matches how the crawler uses URLs.
             let mut lookup = url.clone();
             lookup.set_fragment(None);
             self.responses
@@ -160,6 +167,15 @@ mod tests {
                 .cloned()
                 .unwrap_or(Err(FetchError::Http { status: 404 }))
         }
+    }
+
+    async fn collect_results<F: Fetcher + 'static>(crawler: Crawler<F>) -> Vec<PageResult> {
+        let mut rx = crawler.run();
+        let mut results = Vec::new();
+        while let Some(result) = rx.recv().await {
+            results.push(result);
+        }
+        results
     }
 
     fn config(seed: &str) -> CrawlConfig {
@@ -193,11 +209,8 @@ mod tests {
         let seed = "http://example.com/";
         let mut responses = HashMap::new();
         responses.insert(url(seed), Ok(html_with_links(&[])));
-        // robots.txt → 404 by default (not in map)
 
-        let results = Crawler::new(config(seed), MockFetcher::new(responses))
-            .run()
-            .await;
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses))).await;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].url, url(seed));
@@ -215,9 +228,7 @@ mod tests {
         responses.insert(url(page_a), Ok(html_with_links(&[])));
         responses.insert(url(page_b), Ok(html_with_links(&[])));
 
-        let results = Crawler::new(config(seed), MockFetcher::new(responses))
-            .run()
-            .await;
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses))).await;
 
         let visited = sorted_urls(&results);
         assert_eq!(visited.len(), 3);
@@ -228,7 +239,6 @@ mod tests {
 
     #[tokio::test]
     async fn site_graph_with_cycle() {
-        // a → b → a (cycle); crawler must not fetch any URL more than once.
         let seed = "http://example.com/a";
         let page_b = "http://example.com/b";
 
@@ -236,9 +246,7 @@ mod tests {
         responses.insert(url(seed), Ok(html_with_links(&[page_b])));
         responses.insert(url(page_b), Ok(html_with_links(&[seed])));
 
-        let results = Crawler::new(config(seed), MockFetcher::new(responses))
-            .run()
-            .await;
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses))).await;
 
         let visited = sorted_urls(&results);
         assert_eq!(visited.len(), 2, "each URL fetched exactly once; got {visited:?}");
@@ -248,7 +256,6 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_error_crawl_continues() {
-        // The seed links to /a (error) and /b (ok). Crawl must still complete /b.
         let seed = "http://example.com/";
         let page_a = "http://example.com/a";
         let page_b = "http://example.com/b";
@@ -258,11 +265,8 @@ mod tests {
         responses.insert(url(page_a), Err(FetchError::Http { status: 500 }));
         responses.insert(url(page_b), Ok(html_with_links(&[])));
 
-        let results = Crawler::new(config(seed), MockFetcher::new(responses))
-            .run()
-            .await;
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses))).await;
 
-        // Only successful fetches produce PageResults.
         let visited = sorted_urls(&results);
         assert!(!visited.contains(&url(page_a)), "errored page should not appear in results");
         assert!(visited.contains(&url(seed)));
@@ -279,9 +283,7 @@ mod tests {
         responses.insert(url(seed), Ok(html_with_links(&[external, internal])));
         responses.insert(url(internal), Ok(html_with_links(&[])));
 
-        let results = Crawler::new(config(seed), MockFetcher::new(responses))
-            .run()
-            .await;
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses))).await;
 
         let visited = sorted_urls(&results);
         assert!(!visited.contains(&url(external)), "external URL must not be visited");
@@ -308,11 +310,8 @@ mod tests {
             Ok(html_with_links(&[allowed, disallowed])),
         );
         responses.insert(url(allowed), Ok(html_with_links(&[])));
-        // /private/secret is NOT in the map; any fetch would return 404.
 
-        let results = Crawler::new(config(seed), MockFetcher::new(responses))
-            .run()
-            .await;
+        let results = collect_results(Crawler::new(config(seed), MockFetcher::new(responses))).await;
 
         let visited = sorted_urls(&results);
         assert!(
@@ -325,20 +324,14 @@ mod tests {
 
     use proptest::prelude::*;
 
-    /// Generates a mock site graph as a HashMap<Url, Result<String, FetchError>>.
-    ///
-    /// The graph has a fixed seed http://example.com/ and up to max_pages additional  pages under the 
-    // same host. Each page links to a random subset of the other pages. This produces graphs that may contain cycles, dead ends, and disconnected nodes.
     fn arb_site_graph(
         max_pages: usize,
     ) -> impl Strategy<Value = HashMap<Url, Result<String, FetchError>>> {
-        // Generate between 0 and max_pages additional path segments.
         proptest::collection::vec(
             proptest::string::string_regex("[a-z]{1,6}").unwrap(),
             0..=max_pages,
         )
         .prop_map(|paths| {
-            // Deduplicate to avoid duplicate URLs.
             let mut unique_paths: Vec<String> = paths;
             unique_paths.sort();
             unique_paths.dedup();
@@ -352,9 +345,6 @@ mod tests {
                 )
                 .collect();
 
-            // Build each page's HTML so that it links to every other page in the graph.
-            // This maximises connectivity and therefore maximises opportunities for the crawler to 
-            // revisit a URL (which it must not do).
             let mut responses: HashMap<Url, Result<String, FetchError>> = HashMap::new();
             for page_url in &all_urls {
                 let link_strs: Vec<&str> = all_urls
@@ -388,7 +378,14 @@ mod tests {
 
             let results = tokio::runtime::Runtime::new()
                 .unwrap()
-                .block_on(Crawler::new(cfg, MockFetcher::new(responses)).run());
+                .block_on(async {
+                    let mut rx = Crawler::new(cfg, MockFetcher::new(responses)).run();
+                    let mut results = Vec::new();
+                    while let Some(r) = rx.recv().await {
+                        results.push(r);
+                    }
+                    results
+                });
 
             let mut seen = HashSet::new();
             for r in &results {
