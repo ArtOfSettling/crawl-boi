@@ -5,6 +5,7 @@ pub mod scope;
 pub mod parser;
 pub mod robots;
 pub mod fetcher;
+pub mod crawler;
 #[cfg(feature = "js-rendering")]
 mod js_fetcher;
 
@@ -13,3 +14,4 @@ pub use scope::CrawlScope;
 pub use parser::extract_links;
 pub use robots::{RobotsParser, RobotsRules};
 pub use fetcher::{Fetcher, HttpFetcher};
+pub use crawler::Crawler;
