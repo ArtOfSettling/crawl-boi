@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -31,7 +31,7 @@ impl<F: Fetcher + 'static> Crawler<F> {
         let robots_rules = self.fetch_robots().await;
 
         let visited: Arc<Mutex<HashSet<Url>>> = Arc::new(Mutex::new(HashSet::new()));
-        let mut frontier: Vec<Url> = Vec::new();
+        let mut frontier: VecDeque<Url> = VecDeque::new();
         let mut results: Vec<PageResult> = Vec::new();
 
         // Seed the frontier and visited set.
@@ -50,7 +50,7 @@ impl<F: Fetcher + 'static> Crawler<F> {
             let mut v = visited.lock().unwrap();
             v.insert(self.config.seed.clone());
         }
-        frontier.push(self.config.seed.clone());
+        frontier.push_back(self.config.seed.clone());
 
         let fetcher = Arc::new(self.fetcher);
 
@@ -90,7 +90,7 @@ impl<F: Fetcher + 'static> Crawler<F> {
                             }
                         }
 
-                        frontier.extend(new_urls);
+                        frontier.extend(new_urls.into_iter());
                         results.push(PageResult { url, links });
                     }
                     Err(err) => {
@@ -100,7 +100,7 @@ impl<F: Fetcher + 'static> Crawler<F> {
 
                 // If the frontier has grown and we have spare capacity, dispatch more tasks.
                 while tasks.len() < self.config.concurrency && !frontier.is_empty() {
-                    let next_url = frontier.remove(0);
+                    let next_url = frontier.pop_front().unwrap();
                     let fetcher = Arc::clone(&fetcher);
                     tasks.push(Box::pin(async move {
                         let result = fetcher.fetch(&next_url).await;
