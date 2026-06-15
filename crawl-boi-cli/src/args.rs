@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use url::Url;
 
 /// Comments are needed in this file to visualize 'help' to users of the CLI, that is their sole purpose, they are not here
@@ -29,7 +29,19 @@ pub enum Commands {
         /// Path-prefix budget in the form "/prefix/,N" (repeatable)
         #[arg(short = 'p', long = "path-budget")]
         path_budget: Vec<String>,
+
+        /// Output format: plain (default) or jsonl
+        #[arg(short = 'f', long = "output-format", default_value = "plain")]
+        format: OutputFormat,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// One URL per line, links indented beneath
+    Plain,
+    /// One JSON object per line
+    Jsonl,
 }
 
 /// Parses a `--path-budget` value of the form `"/prefix/,N"`.
@@ -74,6 +86,7 @@ pub fn validate_url(raw: &str) -> Result<Url, String> {
 mod tests {
     use super::*;
     use clap::error::ErrorKind;
+    use proptest::prelude::*;
 
     fn try_parse(args: &[&str]) -> Result<Args, clap::Error> {
         Args::try_parse_from(args)
@@ -198,5 +211,42 @@ mod tests {
                 assert_eq!(path_budget, vec!["/blog/,10".to_owned(), "/docs/,5".to_owned()]);
             }
         }
+    }
+
+    #[test]
+    fn format_jsonl_flag_parsed() {
+        let result = try_parse(&[
+            "crawl-boi", "--url", "https://example.com", "crawl", "--output-format", "jsonl",
+        ]);
+        assert!(result.is_ok());
+        let args = result.unwrap();
+        match args.command {
+            Commands::Crawl { format, .. } => assert_eq!(format, OutputFormat::Jsonl),
+        }
+    }
+
+    #[test]
+    fn format_defaults_to_plain() {
+        let result = try_parse(&[
+            "crawl-boi", "--url", "https://example.com", "crawl",
+        ]);
+        assert!(result.is_ok());
+        let args = result.unwrap();
+        match args.command {
+            Commands::Crawl { format, .. } => assert_eq!(format, OutputFormat::Plain),
+        }
+    }
+
+    fn arb_invalid_url() -> impl Strategy<Value = String> {
+        prop_oneof![
+            // Bare hostnames (no scheme)
+            "[a-z]{3,10}\\.[a-z]{2,4}".prop_map(|s| s),
+            // Non-http schemes
+            "(ftp|mailto|file|ssh|git)://[a-z]{3,10}\\.[a-z]{2,4}".prop_map(|s| s),
+            // Empty strings
+            Just(String::new()),
+            // Random gibberish
+            "[^:/ ]{0,5}".prop_map(|s| s),
+        ]
     }
 }

@@ -4,8 +4,8 @@ mod output;
 use clap::Parser;
 use crawl_boi_core::{CrawlBudget, CrawlConfig, Crawler, HttpFetcher};
 
-use args::{Args, Commands, parse_path_budget, validate_url};
-use output::print_plain;
+use args::{Args, Commands, OutputFormat, parse_path_budget, validate_url};
+use output::{print_jsonl, print_plain};
 
 #[tokio::main]
 async fn main() {
@@ -19,12 +19,13 @@ async fn main() {
         }
     };
 
-    let (concurrency, max_pages, path_budget_raw) = match args.command {
+    let (concurrency, max_pages, path_budget_raw, format) = match args.command {
         Commands::Crawl {
             concurrency,
             max_pages,
             path_budget,
-        } => (concurrency.unwrap_or(8), max_pages, path_budget),
+            format,
+        } => (concurrency.unwrap_or(8), max_pages, path_budget, format),
     };
 
     let mut path_limits = Vec::with_capacity(path_budget_raw.len());
@@ -49,6 +50,9 @@ async fn main() {
     let mut rx = crawler.run();
 
     while let Some(result) = rx.recv().await {
-        print_plain(&result);
+        match format {
+            OutputFormat::Jsonl => print_jsonl(&result),
+            OutputFormat::Plain => print_plain(&result),
+        }
     }
 }

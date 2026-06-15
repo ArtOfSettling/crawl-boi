@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 crawl-boi-core = { path = "../crawl-boi-core" }
 clap = { version = "4", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 url = "2"
 

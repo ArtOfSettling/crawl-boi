@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 
 use crawl_boi_core::PageResult;
+use serde_json;
 
 /// Prints a page result in plain-text format to stdout.
 /// The visited URL appears on its own line, followed by each link indented with two spaces.
@@ -24,6 +25,32 @@ pub fn format_plain<W: Write>(writer: &mut W, result: &PageResult) -> io::Result
         writeln!(writer, "  {link}")?;
     }
     Ok(())
+}
+
+/// Prints a page result as a single JSONL line to stdout.
+/// On serialisation failure, writes an error record to stderr.
+pub fn print_jsonl(result: &PageResult) {
+    match serde_json::to_string(result) {
+        Ok(line) => println!("{line}"),
+        Err(e) => eprintln!("{{\"error\":\"serialisation failed\",\"url\":\"{}\",\"detail\":\"{e}\"}}", result.url),
+    }
+}
+
+/// Formats a page result as a single JSONL line, writing to the provided writer.
+/// On serialisation failure, writes an error record to `err_writer`.
+pub fn format_jsonl<W: Write, E: Write>(
+    writer: &mut W,
+    err_writer: &mut E,
+    result: &PageResult,
+) -> io::Result<()> {
+    match serde_json::to_string(result) {
+        Ok(line) => writeln!(writer, "{line}"),
+        Err(e) => writeln!(
+            err_writer,
+            "{{\"error\":\"serialisation failed\",\"url\":\"{}\",\"detail\":\"{e}\"}}",
+            result.url
+        ),
+    }
 }
 
 /// Formats a fetch error, writing to the provided writer.
@@ -77,6 +104,61 @@ mod tests {
         assert_eq!(output, "https://example.com/broken: HTTP error: status 500\n");
     }
 
+    #[test]
+    fn jsonl_correct_json_structure() {
+        let result = PageResult {
+            url: Url::parse("https://example.com/page").unwrap(),
+            links: vec![
+                Url::parse("https://example.com/a").unwrap(),
+                Url::parse("https://example.com/b").unwrap(),
+            ],
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        format_jsonl(&mut stdout, &mut stderr, &result).unwrap();
+        let output = String::from_utf8(stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(parsed["url"], "https://example.com/page");
+        assert!(parsed["links"].is_array());
+        assert_eq!(parsed["links"].as_array().unwrap().len(), 2);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn jsonl_links_array_present_when_empty() {
+        let result = PageResult {
+            url: Url::parse("https://example.com/alone").unwrap(),
+            links: vec![],
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        format_jsonl(&mut stdout, &mut stderr, &result).unwrap();
+        let output = String::from_utf8(stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(parsed["url"], "https://example.com/alone");
+        assert!(parsed["links"].is_array());
+        assert_eq!(parsed["links"].as_array().unwrap().len(), 0);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn jsonl_output_is_single_line() {
+        let result = PageResult {
+            url: Url::parse("https://example.com/x").unwrap(),
+            links: vec![
+                Url::parse("https://example.com/a").unwrap(),
+                Url::parse("https://example.com/b").unwrap(),
+                Url::parse("https://example.com/c").unwrap(),
+            ],
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        format_jsonl(&mut stdout, &mut stderr, &result).unwrap();
+        let output = String::from_utf8(stdout).unwrap();
+        // JSONL: exactly one newline at the end
+        assert_eq!(output.lines().count(), 1);
+    }
+
     fn arb_path_segment() -> impl Strategy<Value = String> {
         "[a-z][a-z0-9]{0,8}".prop_map(|s| s)
     }
@@ -119,6 +201,17 @@ mod tests {
                     prop_assert_eq!(lines[i + 1].trim(), link.as_str());
                 }
             }
+        }
+
+        // JSONL serialisation round-trip
+        #[test]
+        fn jsonl_round_trip(result in arb_page_result()) {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            format_jsonl(&mut stdout, &mut stderr, &result).unwrap();
+            let output = String::from_utf8(stdout).unwrap();
+            let decoded: PageResult = serde_json::from_str(output.trim()).unwrap();
+            prop_assert_eq!(result, decoded);
         }
     }
 }

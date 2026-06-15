@@ -201,6 +201,7 @@ dependencies = [
  "clap",
  "crawl-boi-core",
  "proptest",
+ "serde_json",
  "tokio",
  "url",
 ]
